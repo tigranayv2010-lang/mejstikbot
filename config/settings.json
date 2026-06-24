@@ -1,0 +1,84 @@
+{
+    "guild_id": 1519284853995081800,
+    "family_name": "MAJESTIK",
+    "embed_color": "7B2FBE",
+    "welcome": {
+        "enabled": true,
+        "channel_id": 1519284854427226244,
+        "title": "👋 Добро пожаловать, {user}!",
+        "description": "Добро пожаловать на сервер **{family_name}**!",
+        "show_member_count": true,
+        "show_avatar": true,
+        "buttons": {
+            "what_next": {
+                "enabled": true,
+                "label": "Что дальше?",
+                "emoji": "🔹",
+                "response": "1️⃣ Ознакомься с правилами\n2️⃣ Подай заявку на вступление\n3️⃣ Представься в общем чате\n4️⃣ Общайся и веселись!"
+            },
+            "apply": {
+                "enabled": true,
+                "label": "Подать заявку",
+                "emoji": "📝",
+                "channel_id": null
+            },
+            "contact_staff": {
+                "enabled": true,
+                "label": "Связаться с руководством",
+                "emoji": "📞"
+            },
+            "introduce": {
+                "enabled": true,
+                "label": "Представиться в общем чате",
+                "emoji": "💬",
+                "channel_id": null
+            }
+        },
+        "dm": {
+            "enabled": true,
+            "title": "✨ Добро пожаловать в {family_name}! ✨",
+            "description": "● Обязательно ознакомься с **правилами** в соответствующем канале\n● После этого, ты можешь оставить **заявку на вступление** в специальном канале\n\n👑 Соблюдай порядок, проявляй активность и поднимай величие семьи вместе с нами!",
+            "rules_channel_id": 1519286969622990869,
+            "apply_channel_id": null
+        }
+    },
+    "farewell": {
+        "enabled": true,
+        "channel_id": null,
+        "title": "👤 Участник покинул сервер",
+        "description": "**{user}** покинул(а) сервер.",
+        "show_member_count": true
+    },
+    "tickets": {
+        "enabled": true,
+        "category_id": 1519285194375434351,
+        "log_channel_id": null,
+        "support_role_id": null,
+        "admin_role_id": null,
+        "panel_title": "🎫 Система тикетов",
+        "panel_description": "Если у тебя есть вопрос, жалоба или предложение — создай тикет, нажав на кнопку ниже.\nНаша команда поддержки ответит тебе в кратчайшие сроки!",
+        "panel_button_label": "Создать тикет",
+        "panel_button_emoji": "📩",
+        "categories": [
+            "Поддержка",
+            "Жалоба",
+            "Вопрос",
+            "Предложение",
+            "Другое"
+        ],
+        "close_confirm_text": "Вы уверены, что хотите закрыть тикет?",
+        "ticket_created_message": "Тикет создан! Опишите вашу проблему, и мы ответим вам в ближайшее время.",
+        "max_open_tickets": 3
+    },
+    "admin_role_id": null,
+    "vacations": {
+        "channel_id": 1519292474756042833
+    },
+    "applications": {
+        "channel_id": 1519293019780808724,
+        "category_id": 1519299161135120607
+    },
+    "promotions": {
+        "category_id": 1519313247038341151
+    }
+}
