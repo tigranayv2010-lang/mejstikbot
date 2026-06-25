@@ -16,6 +16,33 @@ from utils.embeds import (
 
 
 # ──────────────────────────────────────────────
+#  Хелпер — получить список ролей для пинга (тикеты)
+# ──────────────────────────────────────────────
+
+def _get_ticket_ping_roles(cfg: Config, guild: discord.Guild) -> list[discord.Role]:
+    """Возвращает список ролей поддержки/пинга для тикетов."""
+    roles = []
+
+    # Новый формат: массив ID (support_role_ids)
+    ids_list = cfg.get("tickets.support_role_ids", [])
+    if isinstance(ids_list, list):
+        for rid in ids_list:
+            role = guild.get_role(int(rid))
+            if role:
+                roles.append(role)
+
+    # Обратная совместимость: старый одиночный support_role_id
+    if not roles:
+        single_id = cfg.get("tickets.support_role_id")
+        if single_id:
+            role = guild.get_role(int(single_id))
+            if role:
+                roles.append(role)
+
+    return roles
+
+
+# ──────────────────────────────────────────────
 #  Модальное окно — создание тикета
 # ──────────────────────────────────────────────
 
@@ -74,7 +101,6 @@ class TicketModal(ui.Modal):
             category_obj = guild.get_channel(int(category_id))
 
         if category_obj is None:
-            # Создать категорию, если не найдена
             category_obj = discord.utils.get(guild.categories, name="📩 Тикеты")
             if category_obj is None:
                 category_obj = await guild.create_category("📩 Тикеты")
@@ -98,18 +124,16 @@ class TicketModal(ui.Modal):
             ),
         }
 
-        # Добавить роль поддержки
-        support_role_id = cfg.get("tickets.support_role_id")
-        if support_role_id:
-            support_role = guild.get_role(int(support_role_id))
-            if support_role:
-                overwrites[support_role] = discord.PermissionOverwrite(
-                    read_messages=True,
-                    send_messages=True,
-                    attach_files=True,
-                    manage_messages=True,
-                    read_message_history=True,
-                )
+        # Добавить роли поддержки (все из списка)
+        support_roles = _get_ticket_ping_roles(cfg, guild)
+        for support_role in support_roles:
+            overwrites[support_role] = discord.PermissionOverwrite(
+                read_messages=True,
+                send_messages=True,
+                attach_files=True,
+                manage_messages=True,
+                read_message_history=True,
+            )
 
         # Добавить роль администрации
         admin_role_id = cfg.get("tickets.admin_role_id") or cfg.get("admin_role_id")
@@ -149,12 +173,11 @@ class TicketModal(ui.Modal):
         )
         embed.add_field(name="", value=f"\n{created_msg}", inline=False)
 
-        # Пинг поддержки
-        ping_content = member.mention
-        if support_role_id:
-            support_role = guild.get_role(int(support_role_id))
-            if support_role:
-                ping_content += f" | {support_role.mention}"
+        # Пинг: автор + все роли поддержки
+        ping_parts = [member.mention]
+        for role in support_roles:
+            ping_parts.append(role.mention)
+        ping_content = " | ".join(ping_parts)
 
         await ticket_channel.send(
             content=ping_content,
@@ -264,13 +287,11 @@ class TicketCloseConfirmView(ui.View):
         if log_channel_id:
             log_channel = interaction.guild.get_channel(int(log_channel_id))
             if log_channel:
-                # Парсим информацию из топика канала
                 topic = channel.topic or ""
                 parts = topic.split(" | ")
                 author_name = parts[0].replace("Тикет от ", "") if len(parts) > 0 else "Неизвестно"
                 category = parts[1] if len(parts) > 1 else "Неизвестно"
 
-                # Собираем историю сообщений
                 messages = []
                 async for msg in channel.history(limit=100, oldest_first=True):
                     if not msg.author.bot:
@@ -281,14 +302,13 @@ class TicketCloseConfirmView(ui.View):
 
                 log_embed = ticket_log_embed(
                     channel_name=channel.name,
-                    user=interaction.user,  # Упрощение — используем закрывшего
+                    user=interaction.user,
                     closed_by=interaction.user,
                     category=category,
                     created_at=channel.created_at,
                 )
 
                 if messages:
-                    # Ограничиваем лог до 4000 символов
                     history_text = "\n".join(messages)
                     if len(history_text) > 4000:
                         history_text = history_text[:3997] + "..."
