@@ -1,70 +1,112 @@
 import discord
 import asyncio
+import datetime
 from discord.ext import commands
 from discord import app_commands, ui
 
 from config import Config
-from utils.embeds import success_embed, error_embed, base_embed
-
-# ──────────────────────────────────────────────
-#  Вспомогательная функция для удаления канала
-# ──────────────────────────────────────────────
-
-async def delete_app_channel(interaction: discord.Interaction, status: str):
-    try:
-        await interaction.channel.send(
-            embed=base_embed(
-                title=f"Заявка {status}", 
-                description="Канал будет удален через **10 секунд**...",
-                color=discord.Color.orange()
-            )
-        )
-        await asyncio.sleep(10)
-        await interaction.channel.delete(reason="Заявка рассмотрена")
-    except:
-        pass
+from utils.embeds import (
+    ticket_panel_embed,
+    ticket_embed,
+    ticket_log_embed,
+    success_embed,
+    error_embed,
+    base_embed,
+)
 
 
 # ──────────────────────────────────────────────
-#  Модальное окно - Заявка в семью
+#  Хелпер — получить список ролей для пинга (тикеты)
 # ──────────────────────────────────────────────
 
-class ApplicationModal(ui.Modal, title="Заявка в семью"):
-    name = ui.TextInput(label="Ваше имя | ник", placeholder="Иван | ivan123", required=True, max_length=50)
-    playtime = ui.TextInput(label="Сколько проводите время в игре?", placeholder="4-5 часов", required=True, max_length=50)
-    age = ui.TextInput(label="Ваш возраст?", placeholder="18", required=True, max_length=10)
-    video = ui.TextInput(label="Откат стрельбы", placeholder="Ссылка на видео (YouTube/Imgur...)", required=True, max_length=200)
-    how_knew = ui.TextInput(label="Как узнали о семье", placeholder="От друзей / на форуме", required=True, max_length=100)
+def _get_ticket_ping_roles(cfg: Config, guild: discord.Guild) -> list[discord.Role]:
+    """Возвращает список ролей поддержки/пинга для тикетов."""
+    roles = []
+
+    # Новый формат: массив ID (support_role_ids)
+    ids_list = cfg.get("tickets.support_role_ids", [])
+    if isinstance(ids_list, list):
+        for rid in ids_list:
+            role = guild.get_role(int(rid))
+            if role:
+                roles.append(role)
+
+    # Обратная совместимость: старый одиночный support_role_id
+    if not roles:
+        single_id = cfg.get("tickets.support_role_id")
+        if single_id:
+            role = guild.get_role(int(single_id))
+            if role:
+                roles.append(role)
+
+    return roles
+
+
+# ──────────────────────────────────────────────
+#  Модальное окно — создание тикета
+# ──────────────────────────────────────────────
+
+class TicketModal(ui.Modal):
+    """Модальное окно для описания тикета."""
+
+    subject = ui.TextInput(
+        label="Тема",
+        style=discord.TextStyle.short,
+        placeholder="Кратко опишите проблему",
+        required=True,
+        max_length=100,
+    )
+    description = ui.TextInput(
+        label="Описание",
+        style=discord.TextStyle.paragraph,
+        placeholder="Подробно опишите вашу проблему или вопрос...",
+        required=True,
+        max_length=1500,
+    )
+
+    def __init__(self, category: str):
+        super().__init__(title=f"Тикет — {category}")
+        self.category = category
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-
         cfg = Config()
         guild = interaction.guild
         member = interaction.user
-        
-        # Защита от спама каналами заявок
-        existing = [ch for ch in guild.text_channels if ch.name.startswith(f"заявка-{member.name.lower()}")]
-        if existing:
-            await interaction.followup.send(
-                embed=error_embed(f"У вас уже есть открытая заявка: {existing[0].mention}"),
-                ephemeral=True
+
+        # ── Проверка лимита открытых тикетов ──
+        max_tickets = cfg.get("tickets.max_open_tickets", 3)
+        existing = [
+            ch
+            for ch in guild.text_channels
+            if ch.name.startswith(f"ticket-{member.name.lower()}")
+        ]
+        if len(existing) >= max_tickets:
+            await interaction.response.send_message(
+                embed=error_embed(
+                    f"У вас уже открыто **{len(existing)}** тикетов "
+                    f"(максимум: {max_tickets}). Закройте существующий тикет, "
+                    f"прежде чем создавать новый."
+                ),
+                ephemeral=True,
             )
             return
 
-        category_id = cfg.get("applications.category_id")
+        await interaction.response.defer(ephemeral=True)
+
+        # ── Категория (папка каналов) ──
+        category_id = cfg.get("tickets.category_id")
         category_obj = None
 
         if category_id:
             category_obj = guild.get_channel(int(category_id))
 
         if category_obj is None:
-            category_obj = discord.utils.get(guild.categories, name="📝 Заявки")
+            category_obj = discord.utils.get(guild.categories, name="📩 Тикеты")
             if category_obj is None:
-                category_obj = await guild.create_category("📝 Заявки")
-                cfg.set("applications.category_id", category_obj.id)
+                category_obj = await guild.create_category("📩 Тикеты")
+                cfg.set("tickets.category_id", category_obj.id)
 
-        # Права доступа
+        # ── Права доступа ──
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             member: discord.PermissionOverwrite(
@@ -82,7 +124,19 @@ class ApplicationModal(ui.Modal, title="Заявка в семью"):
             ),
         }
 
-        admin_role_id = cfg.get("admin_role_id")
+        # Добавить роли поддержки (все из списка)
+        support_roles = _get_ticket_ping_roles(cfg, guild)
+        for support_role in support_roles:
+            overwrites[support_role] = discord.PermissionOverwrite(
+                read_messages=True,
+                send_messages=True,
+                attach_files=True,
+                manage_messages=True,
+                read_message_history=True,
+            )
+
+        # Добавить роль администрации
+        admin_role_id = cfg.get("tickets.admin_role_id") or cfg.get("admin_role_id")
         if admin_role_id:
             admin_role = guild.get_role(int(admin_role_id))
             if admin_role:
@@ -94,175 +148,296 @@ class ApplicationModal(ui.Modal, title="Заявка в семью"):
                     read_message_history=True,
                 )
 
-        # Создание канала
-        channel_name = f"заявка-{member.name.lower()}"
-        app_channel = await guild.create_text_channel(
+        # ── Создать канал тикета ──
+        ticket_number = len(existing) + 1
+        channel_name = f"ticket-{member.name.lower()}-{ticket_number:02d}"
+
+        ticket_channel = await guild.create_text_channel(
             name=channel_name,
             category=category_obj,
             overwrites=overwrites,
-            topic=f"Заявка на вступление от {member.display_name}",
+            topic=f"Тикет от {member.display_name} | {self.category} | {self.subject.value}",
         )
 
-        embed = base_embed(title="📋 Заявление")
-        embed.add_field(name="Ваше имя | ник", value=self.name.value, inline=False)
-        embed.add_field(name="Сколько проводите время в игре?", value=self.playtime.value, inline=False)
-        embed.add_field(name="Ваш возраст?", value=self.age.value, inline=False)
-        embed.add_field(name="Откат стрельбы", value=self.video.value, inline=False)
-        embed.add_field(name="Как узнали о семье", value=self.how_knew.value, inline=False)
-        
-        embed.add_field(name="Пользователь", value=member.mention, inline=False)
-        embed.add_field(name="Username", value=member.name, inline=False)
-        embed.add_field(name="ID", value=str(member.id), inline=False)
-        
-        ping_content = member.mention
-        if admin_role_id:
-            ping_content += f" | <@&{admin_role_id}>"
+        # ── Embed в тикете ──
+        embed = ticket_embed(
+            user=member,
+            category=self.category,
+            subject=self.subject.value,
+            description=self.description.value,
+        )
 
-        await app_channel.send(content=ping_content, embed=embed, view=ApplicationReviewView())
-        
+        created_msg = cfg.get(
+            "tickets.ticket_created_message",
+            "Тикет создан! Опишите вашу проблему, и мы ответим вам в ближайшее время.",
+        )
+        embed.add_field(name="", value=f"\n{created_msg}", inline=False)
+
+        # Пинг: автор + все роли поддержки
+        ping_parts = [member.mention]
+        for role in support_roles:
+            ping_parts.append(role.mention)
+        ping_content = " | ".join(ping_parts)
+
+        await ticket_channel.send(
+            content=ping_content,
+            embed=embed,
+            view=TicketControlView(),
+        )
+
         await interaction.followup.send(
-            embed=success_embed(f"Ваша заявка успешно создана! Перейдите в канал: {app_channel.mention}"),
-            ephemeral=True
+            embed=success_embed(f"Тикет создан: {ticket_channel.mention}"),
+            ephemeral=True,
         )
 
 
 # ──────────────────────────────────────────────
-#  Модальное окно - Причина отказа
+#  Select Menu — выбор категории
 # ──────────────────────────────────────────────
 
-class DenyReasonModal(ui.Modal, title="Причина отказа"):
-    reason = ui.TextInput(
-        label="Причина отказа", 
-        style=discord.TextStyle.paragraph, 
-        placeholder="Укажите причину, почему заявка отклонена...", 
-        required=True
+class CategorySelect(ui.Select):
+    """Выпадающий список для выбора категории тикета."""
+
+    def __init__(self):
+        cfg = Config()
+        categories = cfg.get("tickets.categories", ["Поддержка", "Жалоба", "Вопрос", "Другое"])
+
+        emoji_map = {
+            "Поддержка": "🛠️",
+            "Жалоба": "⚠️",
+            "Вопрос": "❓",
+            "Предложение": "💡",
+            "Другое": "📌",
+        }
+
+        options = []
+        for cat in categories:
+            emoji = emoji_map.get(cat, "📋")
+            options.append(
+                discord.SelectOption(label=cat, emoji=emoji, value=cat)
+            )
+
+        super().__init__(
+            placeholder="Выберите категорию тикета...",
+            options=options,
+            custom_id="ticket:category_select",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        category = self.values[0]
+        await interaction.response.send_modal(TicketModal(category))
+
+
+class CategorySelectView(ui.View):
+    """View с выбором категории. Ephemeral — не нужен persistent."""
+
+    def __init__(self):
+        super().__init__(timeout=60)
+        self.add_item(CategorySelect())
+
+
+# ──────────────────────────────────────────────
+#  Persistent — кнопка создания тикета (панель)
+# ──────────────────────────────────────────────
+
+class TicketLauncherView(ui.View):
+    """Кнопка «Создать тикет» на панели. Persistent."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+        cfg = Config()
+        label = cfg.get("tickets.panel_button_label", "Создать тикет")
+        emoji = cfg.get("tickets.panel_button_emoji", "📩")
+        self.create_btn.label = label
+        self.create_btn.emoji = emoji
+
+    @ui.button(
+        label="Создать тикет",
+        style=discord.ButtonStyle.blurple,
+        custom_id="ticket:launcher_create",
     )
+    async def create_btn(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_message(
+            embed=base_embed(
+                title="📋 Выберите категорию",
+                description="Выберите категорию тикета из списка ниже:",
+            ),
+            view=CategorySelectView(),
+            ephemeral=True,
+        )
 
-    def __init__(self, applicant_id: int, original_message: discord.Message):
-        super().__init__()
-        self.applicant_id = applicant_id
-        self.original_message = original_message
 
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        
+# ──────────────────────────────────────────────
+#  Persistent — управление тикетом (в канале тикета)
+# ──────────────────────────────────────────────
+
+class TicketCloseConfirmView(ui.View):
+    """Подтверждение закрытия тикета."""
+
+    def __init__(self):
+        super().__init__(timeout=30)
+
+    @ui.button(label="✅ Да, закрыть", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: ui.Button):
         cfg = Config()
-        guild = interaction.guild
-        member = guild.get_member(self.applicant_id)
-        
-        if member:
-            try:
-                family = cfg.get_family_name()
-                embed = error_embed(f"Ваша заявка в семью **{family}** была отклонена.")
-                embed.add_field(name="Причина:", value=self.reason.value, inline=False)
-                await member.send(embed=embed)
-            except discord.Forbidden:
-                pass
-                
-        # Обновляем оригинальное сообщение
-        embed = self.original_message.embeds[0]
-        embed.color = discord.Color.red()
-        embed.title = "📋 Заявление [ОТКЛОНЕНО]"
-        embed.add_field(name="Отклонил", value=interaction.user.mention, inline=False)
-        embed.add_field(name="Причина", value=self.reason.value, inline=False)
-        
-        await self.original_message.edit(embed=embed, view=None)
-        
-        # Удаляем канал
-        await delete_app_channel(interaction, "ОТКЛОНЕНА")
+        channel = interaction.channel
+
+        # Отправляем лог перед удалением
+        log_channel_id = cfg.get("tickets.log_channel_id")
+        if log_channel_id:
+            log_channel = interaction.guild.get_channel(int(log_channel_id))
+            if log_channel:
+                topic = channel.topic or ""
+                parts = topic.split(" | ")
+                author_name = parts[0].replace("Тикет от ", "") if len(parts) > 0 else "Неизвестно"
+                category = parts[1] if len(parts) > 1 else "Неизвестно"
+
+                messages = []
+                async for msg in channel.history(limit=100, oldest_first=True):
+                    if not msg.author.bot:
+                        messages.append(
+                            f"[{msg.created_at.strftime('%d.%m.%Y %H:%M')}] "
+                            f"{msg.author.display_name}: {msg.content}"
+                        )
+
+                log_embed = ticket_log_embed(
+                    channel_name=channel.name,
+                    user=interaction.user,
+                    closed_by=interaction.user,
+                    category=category,
+                    created_at=channel.created_at,
+                )
+
+                if messages:
+                    history_text = "\n".join(messages)
+                    if len(history_text) > 4000:
+                        history_text = history_text[:3997] + "..."
+                    log_embed.add_field(
+                        name="📜 История сообщений",
+                        value=f"```\n{history_text[:1024]}\n```",
+                        inline=False,
+                    )
+
+                await log_channel.send(embed=log_embed)
+
+        await interaction.response.send_message(
+            embed=base_embed(
+                title="🔒 Тикет закрывается",
+                description="Канал будет удалён через **5 секунд**...",
+                color=discord.Color.red(),
+            )
+        )
+        await asyncio.sleep(5)
+        await channel.delete(reason=f"Тикет закрыт пользователем {interaction.user}")
+
+    @ui.button(label="❌ Отмена", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_message("Закрытие отменено.", ephemeral=True)
+        self.stop()
 
 
-# ──────────────────────────────────────────────
-#  Кнопки админов для рассмотрения заявки
-# ──────────────────────────────────────────────
+class TicketControlView(ui.View):
+    """Кнопки управления тикетом. Persistent."""
 
-class ApplicationReviewView(ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    def _get_applicant_id(self, message: discord.Message) -> int:
-        embed = message.embeds[0]
-        for field in embed.fields:
-            if field.name == "ID":
-                return int(field.value)
-        return None
-
-    @ui.button(label="Одобрить", style=discord.ButtonStyle.success, custom_id="app_approve")
-    async def approve_btn(self, interaction: discord.Interaction, button: ui.Button):
-        applicant_id = self._get_applicant_id(interaction.message)
-        if not applicant_id:
-            await interaction.response.send_message("Ошибка: ID пользователя не найден в заявке.", ephemeral=True)
-            return
-
-        await interaction.response.defer()
-
+    @ui.button(
+        label="🔒 Закрыть тикет",
+        style=discord.ButtonStyle.danger,
+        custom_id="ticket:close",
+    )
+    async def close_ticket(self, interaction: discord.Interaction, button: ui.Button):
         cfg = Config()
-        guild = interaction.guild
-        member = guild.get_member(applicant_id)
-        
-        if member:
-            try:
-                family = cfg.get_family_name()
-                approve_msg = cfg.get("applications.approve_message", "Ваша заявка одобрена! Ждём вас в игре.")
-                embed = success_embed(f"Ваша заявка в семью **{family}** одобрена!\n\n{approve_msg}")
-                await member.send(embed=embed)
-            except discord.Forbidden:
-                pass
-                
-        embed = interaction.message.embeds[0]
-        embed.color = discord.Color.green()
-        embed.title = "📋 Заявление [ОДОБРЕНО]"
-        embed.add_field(name="Одобрил", value=interaction.user.mention, inline=False)
-        
-        await interaction.message.edit(embed=embed, view=None)
-        
-        # Удаляем канал
-        await delete_app_channel(interaction, "ОДОБРЕНА")
+        confirm_text = cfg.get(
+            "tickets.close_confirm_text",
+            "Вы уверены, что хотите закрыть тикет?",
+        )
+        await interaction.response.send_message(
+            embed=base_embed(
+                title="⚠️ Подтверждение",
+                description=confirm_text,
+                color=discord.Color.orange(),
+            ),
+            view=TicketCloseConfirmView(),
+            ephemeral=True,
+        )
 
-    @ui.button(label="Отказать", style=discord.ButtonStyle.danger, custom_id="app_deny")
-    async def deny_btn(self, interaction: discord.Interaction, button: ui.Button):
-        applicant_id = self._get_applicant_id(interaction.message)
-        if not applicant_id:
-            await interaction.response.send_message("Ошибка: ID пользователя не найден в заявке.", ephemeral=True)
+    @ui.button(
+        label="📋 Сохранить лог",
+        style=discord.ButtonStyle.secondary,
+        custom_id="ticket:save_log",
+    )
+    async def save_log(self, interaction: discord.Interaction, button: ui.Button):
+        """Сохранить лог тикета в файл и отправить."""
+        await interaction.response.defer(ephemeral=True)
+
+        messages = []
+        async for msg in interaction.channel.history(limit=200, oldest_first=True):
+            timestamp = msg.created_at.strftime("%d.%m.%Y %H:%M:%S")
+            content = msg.content or "[embed/attachment]"
+            messages.append(f"[{timestamp}] {msg.author.display_name}: {content}")
+
+        if not messages:
+            await interaction.followup.send(
+                embed=error_embed("Нет сообщений для сохранения."),
+                ephemeral=True,
+            )
             return
-        await interaction.response.send_modal(DenyReasonModal(applicant_id, interaction.message))
+
+        log_text = f"=== Лог тикета: {interaction.channel.name} ===\n"
+        log_text += f"Дата: {datetime.datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
+        log_text += "=" * 50 + "\n\n"
+        log_text += "\n".join(messages)
+
+        file = discord.File(
+            fp=__import__("io").BytesIO(log_text.encode("utf-8")),
+            filename=f"{interaction.channel.name}-log.txt",
+        )
+
+        await interaction.followup.send(
+            embed=success_embed("Лог тикета сохранён!"),
+            file=file,
+            ephemeral=True,
+        )
 
 
 # ──────────────────────────────────────────────
-#  Панель для подачи заявки
+#  Cog: Tickets
 # ──────────────────────────────────────────────
 
-class ApplicationLauncherView(ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @ui.button(label="📝 Подать заявку", style=discord.ButtonStyle.primary, custom_id="app_launcher")
-    async def apply_btn(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.send_modal(ApplicationModal())
-
-
-# ──────────────────────────────────────────────
-#  Cog
-# ──────────────────────────────────────────────
-
-class ApplicationsCog(commands.Cog):
-    """Система заявок в семью (отдельные каналы)."""
+class TicketsCog(commands.Cog):
+    """Система тикетов."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="app-panel", description="Отправить панель для подачи заявок")
+    @app_commands.command(
+        name="ticket-panel",
+        description="Отправить панель создания тикетов в текущий канал",
+    )
     @app_commands.checks.has_permissions(administrator=True)
-    async def app_panel(self, interaction: discord.Interaction):
-        embed = base_embed(
-            title="📝 Заявка на вступление",
-            description="Нажмите на кнопку ниже, чтобы заполнить анкету на вступление в нашу семью."
+    async def ticket_panel(self, interaction: discord.Interaction):
+        """Отправить embed-панель тикетов с кнопкой «Создать тикет»."""
+        embed = ticket_panel_embed()
+        view = TicketLauncherView()
+
+        await interaction.channel.send(embed=embed, view=view)
+        await interaction.response.send_message(
+            embed=success_embed("Панель тикетов отправлена!"),
+            ephemeral=True,
         )
-        await interaction.channel.send(embed=embed, view=ApplicationLauncherView())
-        await interaction.response.send_message(embed=success_embed("Панель заявок отправлена!"), ephemeral=True)
+
+    @ticket_panel.error
+    async def ticket_panel_error(self, interaction: discord.Interaction, error):
+        if isinstance(error, app_commands.MissingPermissions):
+            await interaction.response.send_message(
+                embed=error_embed("У вас нет прав для использования этой команды."),
+                ephemeral=True,
+            )
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(ApplicationsCog(bot))
-    bot.add_view(ApplicationLauncherView())
-    bot.add_view(ApplicationReviewView())
+    await bot.add_cog(TicketsCog(bot))
+    bot.add_view(TicketLauncherView())  # Persistent views
+    bot.add_view(TicketControlView())
