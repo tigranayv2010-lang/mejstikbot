@@ -1,349 +1,293 @@
 import discord
+import asyncio
 from discord.ext import commands
 from discord import app_commands, ui
 
 from config import Config
-from utils.embeds import base_embed
+from utils.embeds import success_embed, error_embed, base_embed
+
+# ──────────────────────────────────────────────
+#  Хелпер — получить список ролей для пинга (заявки)
+# ──────────────────────────────────────────────
+
+def _get_app_ping_roles(cfg: Config, guild: discord.Guild) -> list[discord.Role]:
+    """Возвращает список ролей для пинга при подаче заявки."""
+    roles = []
+
+    # Новый формат: массив ID (applications.notify_role_ids)
+    ids_list = cfg.get("applications.notify_role_ids", [])
+    if isinstance(ids_list, list):
+        for rid in ids_list:
+            role = guild.get_role(int(rid))
+            if role:
+                roles.append(role)
+
+    # Обратная совместимость: глобальный admin_role_id
+    if not roles:
+        single_id = cfg.get("admin_role_id")
+        if single_id:
+            role = guild.get_role(int(single_id))
+            if role:
+                roles.append(role)
+
+    return roles
 
 
 # ──────────────────────────────────────────────
-#  Структура настроек для UI
+#  Вспомогательная функция для удаления канала
 # ──────────────────────────────────────────────
 
-CATEGORIES = {
-    "general": {"label": "📌 Общие настройки", "description": "Название семьи, цвет, общая роль"},
-    "welcome_channel": {"label": "👋 Приветствия (Канал)", "description": "Настройки приветствий на сервере"},
-    "welcome_dm": {"label": "✉️ Приветствия (ЛС)", "description": "Настройки приветствий в ЛС"},
-    "farewell": {"label": "👤 Прощания", "description": "Настройки сообщений при выходе"},
-    "tickets": {"label": "🎫 Тикеты", "description": "Настройки системы тикетов"},
-    "applications": {"label": "📝 Заявки в семью", "description": "Канал и сообщения для заявок"},
-    "vacations": {"label": "🌴 Отпуски", "description": "Канал для системы отпусков"},
-    "promotions": {"label": "📈 Повышения", "description": "Система заявок на повышение"},
-    "events": {"label": "📅 Мероприятия", "description": "Сборы и тренировки"},
-}
-
-SETTINGS = {
-    "general": [
-        {"id": "family_name", "label": "Название семьи", "type": "modal", "config_key": "family_name"},
-        {"id": "embed_color", "label": "Цвет Embed'ов (HEX без #)", "type": "modal", "config_key": "embed_color"},
-        {"id": "admin_role", "label": "Роль администрации", "type": "role", "config_key": "admin_role_id"},
-    ],
-    "welcome_channel": [
-        {"id": "w_toggle", "label": "Вкл/Выкл приветствия", "type": "toggle", "config_key": "welcome.enabled"},
-        {"id": "w_channel", "label": "Канал приветствий", "type": "channel", "config_key": "welcome.channel_id"},
-        {"id": "w_title", "label": "Заголовок приветствия", "type": "modal", "config_key": "welcome.title"},
-        {"id": "w_text", "label": "Текст приветствия", "type": "modal", "config_key": "welcome.description"},
-        {"id": "w_apply_ch", "label": "Канал кнопки «Заявка»", "type": "channel", "config_key": "welcome.buttons.apply.channel_id"},
-        {"id": "w_intro_ch", "label": "Канал кнопки «Знакомства»", "type": "channel", "config_key": "welcome.buttons.introduce.channel_id"},
-        {"id": "w_next_text", "label": "Текст кнопки «Что дальше?»", "type": "modal", "config_key": "welcome.buttons.what_next.response"},
-    ],
-    "welcome_dm": [
-        {"id": "dm_toggle", "label": "Вкл/Выкл приветствие в ЛС", "type": "toggle", "config_key": "welcome.dm.enabled"},
-        {"id": "dm_title", "label": "Заголовок в ЛС", "type": "modal", "config_key": "welcome.dm.title"},
-        {"id": "dm_text", "label": "Текст в ЛС", "type": "modal", "config_key": "welcome.dm.description"},
-        {"id": "dm_rules", "label": "Канал правил", "type": "channel", "config_key": "welcome.dm.rules_channel_id"},
-        {"id": "dm_apply", "label": "Канал заявок", "type": "channel", "config_key": "welcome.dm.apply_channel_id"},
-    ],
-    "farewell": [
-        {"id": "f_toggle", "label": "Вкл/Выкл прощания", "type": "toggle", "config_key": "farewell.enabled"},
-        {"id": "f_channel", "label": "Канал прощаний", "type": "channel", "config_key": "farewell.channel_id"},
-        {"id": "f_title", "label": "Заголовок прощания", "type": "modal", "config_key": "farewell.title"},
-        {"id": "f_text", "label": "Текст прощания", "type": "modal", "config_key": "farewell.description"},
-    ],
-    "tickets": [
-        {"id": "t_toggle", "label": "Вкл/Выкл тикеты", "type": "toggle", "config_key": "tickets.enabled"},
-        {"id": "t_cat", "label": "Категория для тикетов", "type": "channel_cat", "config_key": "tickets.category_id"},
-        {"id": "t_log", "label": "Канал логов", "type": "channel", "config_key": "tickets.log_channel_id"},
-        {"id": "t_supp", "label": "Роль поддержки", "type": "role", "config_key": "tickets.support_role_id"},
-        {"id": "t_admin", "label": "Роль админов тикетов", "type": "role", "config_key": "tickets.admin_role_id"},
-        {"id": "t_max", "label": "Макс. тикетов на игрока", "type": "modal", "config_key": "tickets.max_open_tickets"},
-        {"id": "t_p_title", "label": "Заголовок панели", "type": "modal", "config_key": "tickets.panel_title"},
-        {"id": "t_p_text", "label": "Описание панели", "type": "modal", "config_key": "tickets.panel_description"},
-        {"id": "t_btn", "label": "Текст кнопки тикета", "type": "modal", "config_key": "tickets.panel_button_label"},
-        {"id": "t_msg", "label": "Сообщение в тикете", "type": "modal", "config_key": "tickets.ticket_created_message"},
-    ],
-    "applications": [
-        {"id": "app_cat", "label": "Категория для заявок", "type": "channel_cat", "config_key": "applications.category_id"},
-        {"id": "app_msg", "label": "Текст при одобрении (в ЛС)", "type": "modal", "config_key": "applications.approve_message"},
-    ],
-    "vacations": [
-        {"id": "vac_ch", "label": "Канал для отпусков", "type": "channel", "config_key": "vacations.channel_id"},
-    ],
-    "promotions": [
-        {"id": "p_cat", "label": "Категория для повышений", "type": "channel_cat", "config_key": "promotions.category_id"},
-        {"id": "p_msg", "label": "Сообщение при одобрении", "type": "modal", "config_key": "promotions.approve_message"},
-    ],
-    "events": [
-        {"id": "e_ch", "label": "Канал мероприятий", "type": "channel", "config_key": "events.channel_id"},
-    ]
-}
-
-
-# ──────────────────────────────────────────────
-#  UI Компоненты (Модалки и Select)
-# ──────────────────────────────────────────────
-
-class ConfigTextModal(ui.Modal):
-    def __init__(self, setting: dict, view_to_refresh: ui.View):
-        super().__init__(title=setting["label"])
-        self.setting = setting
-        self.view_to_refresh = view_to_refresh
-
-        cfg = Config()
-        current_val = str(cfg.get(setting["config_key"], ""))
-
-        # Определяем размер поля ввода в зависимости от текущего текста
-        style = discord.TextStyle.paragraph if len(current_val) > 40 or "\n" in current_val else discord.TextStyle.short
-
-        self.text_input = ui.TextInput(
-            label="Новое значение",
-            default=current_val,
-            style=style,
-            max_length=2000,
-            required=True
+async def delete_app_channel(interaction: discord.Interaction, status: str):
+    try:
+        await interaction.channel.send(
+            embed=base_embed(
+                title=f"Заявка {status}", 
+                description="Канал будет удален через **10 секунд**...",
+                color=discord.Color.orange()
+            )
         )
-        self.add_item(self.text_input)
+        await asyncio.sleep(10)
+        await interaction.channel.delete(reason="Заявка рассмотрена")
+    except:
+        pass
+
+
+# ──────────────────────────────────────────────
+#  Модальное окно - Заявка в семью
+# ──────────────────────────────────────────────
+
+class ApplicationModal(ui.Modal, title="Заявка в семью"):
+    name = ui.TextInput(label="Ваше имя | ник", placeholder="Иван | ivan123", required=True, max_length=50)
+    playtime = ui.TextInput(label="Сколько проводите время в игре?", placeholder="4-5 часов", required=True, max_length=50)
+    age = ui.TextInput(label="Ваш возраст?", placeholder="18", required=True, max_length=10)
+    video = ui.TextInput(label="Откат стрельбы", placeholder="Ссылка на видео (YouTube/Imgur...)", required=True, max_length=200)
+    how_knew = ui.TextInput(label="Как узнали о семье", placeholder="От друзей / на форуме", required=True, max_length=100)
 
     async def on_submit(self, interaction: discord.Interaction):
-        val = self.text_input.value
+        await interaction.response.defer(ephemeral=True)
+
         cfg = Config()
+        guild = interaction.guild
+        member = interaction.user
+        
+        # Защита от спама каналами заявок
+        existing = [ch for ch in guild.text_channels if ch.name.startswith(f"заявка-{member.name.lower()}")]
+        if existing:
+            await interaction.followup.send(
+                embed=error_embed(f"У вас уже есть открытая заявка: {existing[0].mention}"),
+                ephemeral=True
+            )
+            return
 
-        # Специальная обработка для некоторых полей
-        if self.setting["id"] == "t_max":
-            try:
-                val = int(val)
-                if val < 1: val = 1
-            except ValueError:
-                val = 3
-        elif self.setting["id"] == "embed_color":
-            val = val.strip("#").upper()
+        category_id = cfg.get("applications.category_id")
+        category_obj = None
 
-        cfg.set(self.setting["config_key"], val)
-        await self.view_to_refresh.refresh(interaction, f"✅ Параметр **{self.setting['label']}** успешно обновлён!")
+        if category_id:
+            category_obj = guild.get_channel(int(category_id))
 
+        if category_obj is None:
+            category_obj = discord.utils.get(guild.categories, name="📝 Заявки")
+            if category_obj is None:
+                category_obj = await guild.create_category("📝 Заявки")
+                cfg.set("applications.category_id", category_obj.id)
 
-class SelectEntityView(ui.View):
-    """View для выбора канала или роли через Select Menu."""
-    def __init__(self, parent_view: ui.View, setting: dict):
-        super().__init__(timeout=300)
-        self.parent_view = parent_view
-        self.setting = setting
+        # Права доступа
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            member: discord.PermissionOverwrite(
+                read_messages=True,
+                send_messages=True,
+                attach_files=True,
+                embed_links=True,
+                read_message_history=True,
+            ),
+            guild.me: discord.PermissionOverwrite(
+                read_messages=True,
+                send_messages=True,
+                manage_channels=True,
+                manage_messages=True,
+            ),
+        }
 
-        if setting["type"] == "channel":
-            self.select = ui.ChannelSelect(channel_types=[discord.ChannelType.text], placeholder="Выберите текстовый канал...")
-        elif setting["type"] == "channel_cat":
-            self.select = ui.ChannelSelect(channel_types=[discord.ChannelType.category], placeholder="Выберите категорию...")
-        elif setting["type"] == "role":
-            self.select = ui.RoleSelect(placeholder="Выберите роль...")
+        # Добавить все роли пинга в права доступа к каналу
+        ping_roles = _get_app_ping_roles(cfg, guild)
+        for role in ping_roles:
+            overwrites[role] = discord.PermissionOverwrite(
+                read_messages=True,
+                send_messages=True,
+                manage_channels=True,
+                manage_messages=True,
+                read_message_history=True,
+            )
 
-        self.select.callback = self.select_callback
-        self.add_item(self.select)
-
-        back_btn = ui.Button(label="🔙 Назад", style=discord.ButtonStyle.secondary, row=1)
-        back_btn.callback = self.cancel_callback
-        self.add_item(back_btn)
-
-    async def select_callback(self, interaction: discord.Interaction):
-        entity = self.select.values[0]
-        cfg = Config()
-        cfg.set(self.setting["config_key"], entity.id)
-        await self.parent_view.refresh(interaction, f"✅ Параметр **{self.setting['label']}** установлен: {entity.mention if hasattr(entity, 'mention') else entity.name}")
-
-    async def cancel_callback(self, interaction: discord.Interaction):
-        await self.parent_view.refresh(interaction, "🔙 Выбор отменён.")
-
-
-# ──────────────────────────────────────────────
-#  Основные View Конфигуратора
-# ──────────────────────────────────────────────
-
-class CategoryConfigView(ui.View):
-    """View, где пользователь выбирает конкретный параметр в рамках категории."""
-    def __init__(self, category_id: str, user_id: int):
-        super().__init__(timeout=300)
-        self.category_id = category_id
-        self.user_id = user_id
-
-        options = []
-        for s in SETTINGS[category_id]:
-            options.append(discord.SelectOption(label=s["label"], value=s["id"]))
-
-        self.select = ui.Select(placeholder="Выберите параметр для настройки...", options=options)
-        self.select.callback = self.setting_select_callback
-        self.add_item(self.select)
-
-        back_btn = ui.Button(label="🔙 Вернуться к категориям", style=discord.ButtonStyle.secondary, row=1)
-        back_btn.callback = self.back_callback
-        self.add_item(back_btn)
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.user_id
-
-    async def back_callback(self, interaction: discord.Interaction):
-        view = MainConfigView(self.user_id)
-        embed = get_config_summary_embed(interaction.guild)
-        await interaction.response.edit_message(embed=embed, view=view)
-
-    async def setting_select_callback(self, interaction: discord.Interaction):
-        setting_id = self.select.values[0]
-        setting = next(s for s in SETTINGS[self.category_id] if s["id"] == setting_id)
-
-        if setting["type"] == "toggle":
-            cfg = Config()
-            current = cfg.get(setting["config_key"], True)
-            cfg.set(setting["config_key"], not current)
-            state_text = "ВКЛЮЧЕНО ✅" if not current else "ВЫКЛЮЧЕНО ❌"
-            await self.refresh(interaction, f"✅ Параметр **{setting['label']}** теперь **{state_text}**")
-
-        elif setting["type"] == "modal":
-            await interaction.response.send_modal(ConfigTextModal(setting, self))
-
-        elif setting["type"] in ("channel", "channel_cat", "role"):
-            view = SelectEntityView(self, setting)
-            embed = base_embed(title=f"⚙️ Настройка: {setting['label']}", description="Выберите нужное значение в меню ниже.")
-            await interaction.response.edit_message(embed=embed, view=view)
-
-    async def refresh(self, interaction: discord.Interaction, message: str):
-        embed = base_embed(title=CATEGORIES[self.category_id]["label"], description=message)
-        if interaction.response.is_done():
-            await interaction.edit_original_response(embed=embed, view=self)
-        else:
-            await interaction.response.edit_message(embed=embed, view=self)
-
-
-class MainConfigView(ui.View):
-    """Главное меню со списком категорий настроек."""
-    def __init__(self, user_id: int):
-        super().__init__(timeout=300)
-        self.user_id = user_id
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Это меню не для вас.", ephemeral=True)
-            return False
-        return True
-
-    @ui.select(placeholder="Выберите категорию...", options=[
-        discord.SelectOption(label=cat["label"], description=cat["description"], value=k)
-        for k, cat in CATEGORIES.items()
-    ])
-    async def category_select(self, interaction: discord.Interaction, select: ui.Select):
-        cat_id = select.values[0]
-        view = CategoryConfigView(cat_id, self.user_id)
-        embed = base_embed(
-            title=CATEGORIES[cat_id]["label"],
-            description="Выберите конкретный параметр для настройки из списка ниже."
+        # Создание канала
+        channel_name = f"заявка-{member.name.lower()}"
+        app_channel = await guild.create_text_channel(
+            name=channel_name,
+            category=category_obj,
+            overwrites=overwrites,
+            topic=f"Заявка на вступление от {member.display_name}",
         )
-        await interaction.response.edit_message(embed=embed, view=view)
 
-    @ui.button(label="🔄 Обновить информацию", style=discord.ButtonStyle.secondary, row=1)
-    async def refresh_btn(self, interaction: discord.Interaction, button: ui.Button):
-        embed = get_config_summary_embed(interaction.guild)
-        await interaction.response.edit_message(embed=embed, view=self)
+        embed = base_embed(title="📋 Заявление")
+        embed.add_field(name="Ваше имя | ник", value=self.name.value, inline=False)
+        embed.add_field(name="Сколько проводите время в игре?", value=self.playtime.value, inline=False)
+        embed.add_field(name="Ваш возраст?", value=self.age.value, inline=False)
+        embed.add_field(name="Откат стрельбы", value=self.video.value, inline=False)
+        embed.add_field(name="Как узнали о семье", value=self.how_knew.value, inline=False)
+        
+        embed.add_field(name="Пользователь", value=member.mention, inline=False)
+        embed.add_field(name="Username", value=member.name, inline=False)
+        embed.add_field(name="ID", value=str(member.id), inline=False)
+        
+        # Пинг: автор + все роли
+        ping_parts = [member.mention]
+        for role in ping_roles:
+            ping_parts.append(role.mention)
+        ping_content = " | ".join(ping_parts)
+
+        await app_channel.send(content=ping_content, embed=embed, view=ApplicationReviewView())
+        
+        await interaction.followup.send(
+            embed=success_embed(f"Ваша заявка успешно создана! Перейдите в канал: {app_channel.mention}"),
+            ephemeral=True
+        )
 
 
 # ──────────────────────────────────────────────
-#  Вспомогательная функция для сводки
+#  Модальное окно - Причина отказа
 # ──────────────────────────────────────────────
 
-def _channel_display(guild: discord.Guild, channel_id) -> str:
-    if not channel_id: return "`Не установлен`"
-    channel = guild.get_channel(int(channel_id))
-    return channel.mention if channel else f"`{channel_id}` (не найден)"
-
-def _role_display(guild: discord.Guild, role_id) -> str:
-    if not role_id: return "`Не установлена`"
-    role = guild.get_role(int(role_id))
-    return role.mention if role else f"`{role_id}` (не найдена)"
-
-def get_config_summary_embed(guild: discord.Guild) -> discord.Embed:
-    """Создает embed со всеми текущими настройками для главного меню."""
-    cfg = Config()
-    embed = base_embed(
-        title="⚙️ Панель управления MAJESTIK",
-        description="Выберите категорию в меню ниже, чтобы изменить настройки."
+class DenyReasonModal(ui.Modal, title="Причина отказа"):
+    reason = ui.TextInput(
+        label="Причина отказа", 
+        style=discord.TextStyle.paragraph, 
+        placeholder="Укажите причину, почему заявка отклонена...", 
+        required=True
     )
 
-    embed.add_field(
-        name="📌 Общие",
-        value=(
-            f"**Семья:** {cfg.get_family_name()}\n"
-            f"**Цвет:** `#{cfg.get('embed_color', '7B2FBE')}`\n"
-            f"**Админы:** {_role_display(guild, cfg.get('admin_role_id'))}"
-        ),
-        inline=False,
-    )
+    def __init__(self, applicant_id: int, original_message: discord.Message):
+        super().__init__()
+        self.applicant_id = applicant_id
+        self.original_message = original_message
 
-    wc = cfg.get("welcome.channel_id")
-    embed.add_field(
-        name="👋 Приветствия (Канал)",
-        value=(
-            f"**Статус:** {'✅' if cfg.get('welcome.enabled', True) else '❌'}\n"
-            f"**Канал:** {_channel_display(guild, wc)}"
-        ),
-        inline=True,
-    )
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        
+        cfg = Config()
+        guild = interaction.guild
+        member = guild.get_member(self.applicant_id)
+        
+        if member:
+            try:
+                family = cfg.get_family_name()
+                embed = error_embed(f"Ваша заявка в семью **{family}** была отклонена.")
+                embed.add_field(name="Причина:", value=self.reason.value, inline=False)
+                await member.send(embed=embed)
+            except discord.Forbidden:
+                pass
+                
+        embed = self.original_message.embeds[0]
+        embed.color = discord.Color.red()
+        embed.title = "📋 Заявление [ОТКЛОНЕНО]"
+        embed.add_field(name="Отклонил", value=interaction.user.mention, inline=False)
+        embed.add_field(name="Причина", value=self.reason.value, inline=False)
+        
+        await self.original_message.edit(embed=embed, view=None)
+        
+        await delete_app_channel(interaction, "ОТКЛОНЕНА")
 
-    embed.add_field(
-        name="✉️ Приветствия (ЛС)",
-        value=(
-            f"**Статус:** {'✅' if cfg.get('welcome.dm.enabled', True) else '❌'}\n"
-            f"**Правила:** {_channel_display(guild, cfg.get('welcome.dm.rules_channel_id'))}\n"
-            f"**Заявки:** {_channel_display(guild, cfg.get('welcome.dm.apply_channel_id'))}"
-        ),
-        inline=True,
-    )
 
-    tc = cfg.get("tickets.category_id")
-    embed.add_field(
-        name="🎫 Тикеты",
-        value=(
-            f"**Статус:** {'✅' if cfg.get('tickets.enabled', True) else '❌'}\n"
-            f"**Категория:** {_channel_display(guild, tc)}\n"
-            f"**Поддержка:** {_role_display(guild, cfg.get('tickets.support_role_id'))}"
-        ),
-        inline=False,
-    )
+# ──────────────────────────────────────────────
+#  Кнопки админов для рассмотрения заявки
+# ──────────────────────────────────────────────
 
-    embed.add_field(
-        name="📝 Заявки и Отпуски",
-        value=(
-            f"**Категория заявок:** {_channel_display(guild, cfg.get('applications.category_id'))}\n"
-            f"**Отпуски:** {_channel_display(guild, cfg.get('vacations.channel_id'))}"
-        ),
-        inline=False,
-    )
+class ApplicationReviewView(ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
 
-    embed.add_field(
-        name="🚀 Повышения и Мероприятия",
-        value=(
-            f"**Категория повышений:** {_channel_display(guild, cfg.get('promotions.category_id'))}\n"
-            f"**Канал мероприятий:** {_channel_display(guild, cfg.get('events.channel_id'))}"
-        ),
-        inline=False,
-    )
+    def _get_applicant_id(self, message: discord.Message) -> int:
+        embed = message.embeds[0]
+        for field in embed.fields:
+            if field.name == "ID":
+                return int(field.value)
+        return None
 
-    return embed
+    @ui.button(label="Одобрить", style=discord.ButtonStyle.success, custom_id="app_approve")
+    async def approve_btn(self, interaction: discord.Interaction, button: ui.Button):
+        applicant_id = self._get_applicant_id(interaction.message)
+        if not applicant_id:
+            await interaction.response.send_message("Ошибка: ID пользователя не найден в заявке.", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+
+        cfg = Config()
+        guild = interaction.guild
+        member = guild.get_member(applicant_id)
+        
+        if member:
+            try:
+                family = cfg.get_family_name()
+                approve_msg = cfg.get("applications.approve_message", "Ваша заявка одобрена! Ждём вас в игре.")
+                embed = success_embed(f"Ваша заявка в семью **{family}** одобрена!\n\n{approve_msg}")
+                await member.send(embed=embed)
+            except discord.Forbidden:
+                pass
+                
+        embed = interaction.message.embeds[0]
+        embed.color = discord.Color.green()
+        embed.title = "📋 Заявление [ОДОБРЕНО]"
+        embed.add_field(name="Одобрил", value=interaction.user.mention, inline=False)
+        
+        await interaction.message.edit(embed=embed, view=None)
+        
+        await delete_app_channel(interaction, "ОДОБРЕНА")
+
+    @ui.button(label="Отказать", style=discord.ButtonStyle.danger, custom_id="app_deny")
+    async def deny_btn(self, interaction: discord.Interaction, button: ui.Button):
+        applicant_id = self._get_applicant_id(interaction.message)
+        if not applicant_id:
+            await interaction.response.send_message("Ошибка: ID пользователя не найден в заявке.", ephemeral=True)
+            return
+        await interaction.response.send_modal(DenyReasonModal(applicant_id, interaction.message))
+
+
+# ──────────────────────────────────────────────
+#  Панель для подачи заявки
+# ──────────────────────────────────────────────
+
+class ApplicationLauncherView(ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @ui.button(label="📝 Подать заявку", style=discord.ButtonStyle.primary, custom_id="app_launcher")
+    async def apply_btn(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_modal(ApplicationModal())
 
 
 # ──────────────────────────────────────────────
 #  Cog
 # ──────────────────────────────────────────────
 
-class ConfigCog(commands.Cog):
-    """Единая команда конфигурации с UI-меню."""
+class ApplicationsCog(commands.Cog):
+    """Система заявок в семью (отдельные каналы)."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="config", description="Открыть панель управления ботом (Интерактивное меню)")
+    @app_commands.command(name="app-panel", description="Отправить панель для подачи заявок")
     @app_commands.checks.has_permissions(administrator=True)
-    async def config(self, interaction: discord.Interaction):
-        """Отправляет главное интерактивное меню настроек."""
-        embed = get_config_summary_embed(interaction.guild)
-        view = MainConfigView(user_id=interaction.user.id)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    async def app_panel(self, interaction: discord.Interaction):
+        embed = base_embed(
+            title="📝 Заявка на вступление",
+            description="Нажмите на кнопку ниже, чтобы заполнить анкету на вступление в нашу семью."
+        )
+        await interaction.channel.send(embed=embed, view=ApplicationLauncherView())
+        await interaction.response.send_message(embed=success_embed("Панель заявок отправлена!"), ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(ConfigCog(bot))
+    await bot.add_cog(ApplicationsCog(bot))
+    bot.add_view(ApplicationLauncherView())
+    bot.add_view(ApplicationReviewView())
